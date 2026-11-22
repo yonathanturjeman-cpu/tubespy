@@ -198,6 +198,22 @@ def test_run_refresh_excludes_store_history_and_records_new_picks(tmp_path):
     assert store.suggested_history() == {"vid000001ab", "vid000002ab", "vid000003ab"}
 
 
+def test_run_refresh_uses_the_provided_full_dataset_not_the_path(tmp_path):
+    # library_path holds only OUR advertisers (here: none). The FULL all-tab dataset
+    # (our + Liel's shared raw) is passed in memory and must be what Suggestions picks
+    # from -- this is how Liel's brands become suggestable.
+    lib = tmp_path / "library.json"
+    lib.write_text(json.dumps(ds([])), encoding="utf-8")        # our library: no videos
+    out = tmp_path / "suggestions.json"
+    full = ds([vid(1), vid(2)])                                  # stands in for our + shared
+    picker = lambda cands: [{"video_id": c["video_id"], "reason": "r"} for c in cands]
+    seen = set()
+    S.run_refresh(lib, {}, out, when=datetime(2026, 11, 9), picker=picker, dataset=full,
+                  history_get=lambda: seen, history_add=seen.update)  # isolate from the real build/ file
+    ids = [r["video_id"] for r in json.loads(out.read_text(encoding="utf-8"))["suggestions"]]
+    assert set(ids) == {"vid000001ab", "vid000002ab"}           # from the dataset, not the empty file
+
+
 def test_seed_store_history_from_suggestions_json(tmp_path):
     from add_brand import Store
     store = Store(tmp_path / "q.sqlite")

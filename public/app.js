@@ -82,15 +82,21 @@ function loadLocalStates() {
 function saveLocalStates() {
   try { localStorage.setItem(LS_KEY, JSON.stringify(states)); } catch { /* ignore */ }
 }
-async function loadStates() {
-  states = loadLocalStates();
+async function loadStates(baseline) {
+  // `baseline` is the owner's Used / Not relevant list snapshotted into the published
+  // library.json at nightly publish — the preview can't reach the Mini's API, so this
+  // is how Not relevant stays hidden and Used stays on the Used tab for EVERYONE
+  // (one night delay). The viewer's own browser clicks always win over the baseline.
+  const base = baseline || {};
+  states = { ...base, ...loadLocalStates() };
   try {
     const r = await fetch("/api/item-states", { cache: "no-store", signal: AbortSignal.timeout(10000) });
     if (r.ok) {
       const data = await r.json();
-      if (data && data.states) { states = data.states; saveLocalStates(); }
+      // API (the live store) is authoritative over the published snapshot; local clicks still win.
+      if (data && data.states) { states = { ...base, ...data.states, ...loadLocalStates() }; saveLocalStates(); }
     }
-  } catch { /* offline: keep localStorage copy */ }
+  } catch { /* offline/preview: keep the published baseline + local clicks */ }
 }
 async function setState(videoId, state) {
   if (state === "new") delete states[videoId]; else states[videoId] = state;
@@ -294,7 +300,7 @@ async function init() {
     if (!response.ok) throw new Error(`Data request failed: ${response.status}`);
     library = await response.json();
     allVideos = flatten(library);
-    await loadStates();
+    await loadStates(library.item_states);  // published Used / Not relevant baseline (preview has no API)
     try { const sr = await fetch("data/suggestions.json", { cache: "no-store" }); if (sr.ok) suggestions = (await sr.json()).suggestions || []; } catch { /* none generated yet */ }
     renderSummary(library);
     populateAdvertisers();

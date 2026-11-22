@@ -301,20 +301,25 @@ def is_refresh_day(when: datetime) -> bool:
 
 
 def run_refresh(library_path, item_states, out_path, when=None, picker=None,
-                *, history_get=None, history_add=None) -> dict:
+                *, history_get=None, history_add=None, dataset=None) -> dict:
     """Twice-weekly refresh: REPLACE suggestions.json with 10 NEW picks (never
     suggested before) and record them in the no-repeat history. No-op on non-refresh
     days (and never Sunday).
 
     history_get() -> ids ever suggested; history_add(ids) records the new picks. They
     default to the local build/ JSON file; the live instance passes store-backed ones
-    (store.suggested_history / store.add_suggested) so history survives redeploys."""
+    (store.suggested_history / store.add_suggested) so history survives redeploys.
+
+    dataset overrides reading library_path -- the nightly passes the FULL all-tab
+    library (our advertisers + Liel's shared raw) so Suggestions can pick from his
+    brands too, not only ours."""
     history_get = history_get or load_history
     history_add = history_add or (lambda ids: save_history(load_history() | set(ids)))
     when = when or datetime.now(timezone.utc)
     if not is_refresh_day(when):
         return {"refreshed": False, "reason": "not a refresh day"}
-    dataset = json.loads(Path(library_path).read_text(encoding="utf-8"))
+    if dataset is None:
+        dataset = json.loads(Path(library_path).read_text(encoding="utf-8"))
     history = set(history_get())
     try:
         rows = generate(dataset, item_states, history, picker)

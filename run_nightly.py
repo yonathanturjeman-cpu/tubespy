@@ -157,20 +157,26 @@ async def _run_async(now_local: datetime, deadline: float, dry_run: bool) -> dic
             await context.close(); await browser.close()
 
     # 4) SUGGESTIONS
+    # The FULL library the public sees: our advertisers + Liel's shared raw (read-only).
+    # Suggestions AND publish both use it, so Suggestions can pick from Liel's brands too.
+    all_tab = _merged_all_tab(lib_path, now_local)
+    item_states = store.item_states()
+
     import suggestions
     sugg_path = mini_config.OUR_ROOT / "public" / "data" / "suggestions.json"
-    if lib_path.exists():
+    if all_tab.get("advertisers"):
         # Seed the durable no-repeat history once from every video ever suggested
         # (idempotent/add-only), then refresh against the store-backed history so a
         # fresh mini never re-offers old picks and each refresh is 10 NEW ones.
         suggestions.seed_store_history(store, sugg_path, suggestions.HISTORY_PATH)
         report["suggestions"] = suggestions.run_refresh(
-            lib_path, store.item_states(), sugg_path, when=now_local,
-            history_get=store.suggested_history, history_add=store.add_suggested)
+            lib_path, item_states, sugg_path, when=now_local,
+            history_get=store.suggested_history, history_add=store.add_suggested,
+            dataset=all_tab)
         log.info("suggestions: %s", report["suggestions"])
 
     # 5) PUBLISH (full site to OUR preview; never Liel's live page)
-    report["published"] = _publish(lib_path, now_local)
+    report["published"] = _publish(all_tab, item_states, now_local)
     log.info("published: %s", report["published"])
     return report
 
@@ -268,16 +274,27 @@ async def _discover_and_screen(context, store, lib_path, prio, now_local) -> dic
             "passed": len(screened["passed"]), "queued": queued, "skipped": len(screened["skipped"])}
 
 
-def _publish(lib_path: Path, now_local: datetime) -> dict:
+def _merged_all_tab(lib_path: Path, now_local: datetime) -> dict:
+    """The All-tab library the public sees: our advertisers + Liel's shared raw
+    (READ-ONLY; never mutated). Used for both Suggestions and publish so they agree."""
+    our = json.loads(lib_path.read_text(encoding="utf-8")) if lib_path.exists() else {"schema_version": 2, "advertisers": []}
+    shared = nightly.read_shared_advertisers(mini_config.SHARED_RAW_DIR, now_local)   # read-only; may be []
+    return nightly.merge_all_tab(our, shared)
+
+
+def _publish(merged: dict, item_states: dict, now_local: datetime) -> dict:
     """Build the COMPLETE static site folder (index.html, app.js, styles.css + data)
     into OUR preview target, with the All-tab library (our brands + Liel's shared raw,
     READ-ONLY). Henry uploads this folder to a separate preview link. Refuses, as a hard
     backstop, to publish to Liel's live slug/path. Never writes under the shared raw."""
     import library as lib_mod
+    import shutil
     nightly.assert_safe_publish_target(mini_config.PUBLISH_SLUG, mini_config.PUBLISH_DIR)
-    our = json.loads(lib_path.read_text(encoding="utf-8")) if lib_path.exists() else {"schema_version": 2, "advertisers": []}
-    shared = nightly.read_shared_advertisers(mini_config.SHARED_RAW_DIR, now_local)   # read-only; may be []
-    merged = nightly.merge_all_tab(our, shared)
+    # The preview can't reach the Mini's API, so snapshot the owner's Used / Not relevant
+    # list into the published data: Not relevant stays hidden and Used stays on the Used
+    # tab for EVERYONE (one night delay). Browser-local clicks still apply on top.
+    merged = dict(merged)
+    merged["item_states"] = dict(item_states or {})
 
     public_dir = mini_config.OUR_ROOT / "public"
     # Stage the full allowlisted site (html/js/css + data/library.json) into the target,
@@ -285,10 +302,18 @@ def _publish(lib_path: Path, now_local: datetime) -> dict:
     # our own public/ copy is never polluted with Liel's advertisers.
     stage = lib_mod.build_stage(public_dir, mini_config.PUBLISH_DIR)
     (stage / "data" / "library.json").write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # build_stage does not allowlist data/suggestions.json, so the preview's Suggestions
+    # tab would be empty — copy the current suggestions file into the published folder.
+    sugg_src = public_dir / "data" / "suggestions.json"
+    if sugg_src.exists():
+        shutil.copyfile(sugg_src, stage / "data" / "suggestions.json")
+
     files = sorted(p.name for p in stage.glob("*") if p.is_file())
     return {"target": str(stage), "slug": mini_config.PUBLISH_SLUG, "files": files,
             "advertisers": len(merged["advertisers"]),
-            "shared_included": merged.get("source_summary", {}).get("shared_advertisers_included", 0)}
+            "shared_included": merged.get("source_summary", {}).get("shared_advertisers_included", 0),
+            "item_states_embedded": len(merged["item_states"]),
+            "suggestions_copied": sugg_src.exists()}
 
 
 def main() -> int:
