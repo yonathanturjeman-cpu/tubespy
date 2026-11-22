@@ -72,16 +72,17 @@ def signal_score(video: dict) -> float:
     return vpd * ad_boost * recency
 
 
-def prefilter(videos: list[dict], excluded_ids: set[str]) -> list[dict]:
+def prefilter(videos: list[dict], excluded_ids: set[str],
+              max_age_days: int = MAX_AGE_DAYS, min_views: int = MIN_VIEWS) -> list[dict]:
     kept = []
     for v in videos:
         if v["video_id"] in excluded_ids:
             continue
         if not (MIN_SECONDS <= (v.get("length_seconds") or 0) <= MAX_SECONDS):
             continue
-        if (v.get("views") or 0) < MIN_VIEWS:
+        if (v.get("views") or 0) < min_views:
             continue
-        if (v.get("age_days") or 10**9) > MAX_AGE_DAYS:
+        if (v.get("age_days") or 10**9) > max_age_days:
             continue
         kept.append(v)
     return kept
@@ -109,6 +110,30 @@ def top_candidates(videos: list[dict], limit: int = CANDIDATE_POOL,
         if len(out) >= limit:
             break
     return out
+
+
+# Relax ONLY in this order, and only as far as needed to reach 10 candidates. Each
+# step is strictly more permissive than the last, so the eligible pool only grows.
+# English-only (applied upstream in generate) is NEVER relaxed.
+RELAX_LADDER = [
+    {"max_age_days": 365, "max_per_advertiser": 2, "min_views": 1_000_000},  # base
+    {"max_age_days": 730, "max_per_advertiser": 2, "min_views": 1_000_000},  # age 12->24 months
+    {"max_age_days": 730, "max_per_advertiser": 3, "min_views": 1_000_000},  # then max 3 / advertiser
+    {"max_age_days": 730, "max_per_advertiser": 3, "min_views":   500_000},  # then 500K+ views
+]
+
+
+def eligible_pool(videos: list[dict], excluded_ids: set[str], target: int = PICK) -> tuple[list[dict], int]:
+    """The candidate pool, relaxing the filters in RELAX_LADDER order only as far as
+    needed to reach `target` candidates (so we always offer 10 when the data allows).
+    Returns (pool, step_index); step 0 means nothing had to be relaxed."""
+    pool: list[dict] = []
+    for step, knobs in enumerate(RELAX_LADDER):
+        pre = prefilter(videos, excluded_ids, max_age_days=knobs["max_age_days"], min_views=knobs["min_views"])
+        pool = top_candidates(pre, max_per_advertiser=knobs["max_per_advertiser"])
+        if len(pool) >= target:
+            return pool, step
+    return pool, len(RELAX_LADDER) - 1   # exhausted: best effort with the most relaxed step
 
 
 # ---------- the one batched Claude call ----------
@@ -240,6 +265,32 @@ def save_history(ids: set[str]) -> None:
     HISTORY_PATH.write_text(json.dumps(sorted(ids)), encoding="utf-8")
 
 
+def ids_ever_suggested(suggestions_path, *extra_json_paths) -> set[str]:
+    """Every video id we can find that was ever suggested: the current suggestions.json
+    plus any legacy history JSON files. Used to seed the durable store on an instance
+    that started with an empty build/ (so old picks are never suggested again)."""
+    ids: set[str] = set()
+    for p in (suggestions_path, *extra_json_paths):
+        try:
+            data = json.loads(Path(p).read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict) and isinstance(data.get("suggestions"), list):
+            ids |= {r.get("video_id") for r in data["suggestions"] if isinstance(r, dict) and r.get("video_id")}
+        elif isinstance(data, list):
+            ids |= {x for x in data if isinstance(x, str)}
+    return ids
+
+
+def seed_store_history(store, suggestions_path, *extra_json_paths) -> set[str]:
+    """One-time, idempotent seed of the store's durable no-repeat history from every
+    video ever suggested. Add-only, so it is safe to call on every service startup."""
+    ids = ids_ever_suggested(suggestions_path, *extra_json_paths)
+    if ids:
+        store.add_suggested(ids)
+    return ids
+
+
 # ---------- orchestration ----------
 
 REFRESH_WEEKDAYS = {0, 3}  # Monday & Thursday — twice a week, never Sunday (weekday 6)
@@ -249,14 +300,22 @@ def is_refresh_day(when: datetime) -> bool:
     return when.weekday() in REFRESH_WEEKDAYS
 
 
-def run_refresh(library_path, item_states, out_path, when=None, picker=None) -> dict:
-    """Twice-weekly refresh: generate 10 suggestions, write suggestions.json, and
-    append them to the no-repeat history. No-op on non-refresh days (and never Sunday)."""
+def run_refresh(library_path, item_states, out_path, when=None, picker=None,
+                *, history_get=None, history_add=None) -> dict:
+    """Twice-weekly refresh: REPLACE suggestions.json with 10 NEW picks (never
+    suggested before) and record them in the no-repeat history. No-op on non-refresh
+    days (and never Sunday).
+
+    history_get() -> ids ever suggested; history_add(ids) records the new picks. They
+    default to the local build/ JSON file; the live instance passes store-backed ones
+    (store.suggested_history / store.add_suggested) so history survives redeploys."""
+    history_get = history_get or load_history
+    history_add = history_add or (lambda ids: save_history(load_history() | set(ids)))
     when = when or datetime.now(timezone.utc)
     if not is_refresh_day(when):
         return {"refreshed": False, "reason": "not a refresh day"}
     dataset = json.loads(Path(library_path).read_text(encoding="utf-8"))
-    history = load_history()
+    history = set(history_get())
     try:
         rows = generate(dataset, item_states, history, picker)
     except SuggestionsParseError as exc:
@@ -268,7 +327,7 @@ def run_refresh(library_path, item_states, out_path, when=None, picker=None) -> 
     Path(out_path).write_text(
         json.dumps({"generated_at": when.isoformat(), "suggestions": rows}, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8")
-    save_history(history | {r["video_id"] for r in rows})
+    history_add({r["video_id"] for r in rows})
     return {"refreshed": True, "count": len(rows)}
 
 
@@ -282,13 +341,16 @@ def generate(dataset: dict, item_states: dict, history: set[str], picker=None) -
             if v.get("english") is True
             and not own_brands.is_own(v.get("advertiser_name"), v.get("landing_domain"))]
     videos = {v["video_id"]: v for v in flat}
-    pool = top_candidates(prefilter(list(videos.values()), excluded))
+    pool, _ = eligible_pool(list(videos.values()), excluded)
     picks = choose_with_claude(pool, picker)
-    rows = []
-    for rank, pick in enumerate(picks, 1):
-        v = videos.get(pick["video_id"])
-        if not v:
+    rows, seen = [], set()
+    for pick in picks:
+        vid = pick["video_id"]
+        v = videos.get(vid)
+        if not v or vid in seen:   # drop unknowns and de-dupe (never show a video twice)
             continue
+        seen.add(vid)
+        rank = len(rows) + 1
         rows.append({
             "rank": rank, "reason": pick["reason"], "video_id": v["video_id"],
             "product": v.get("product"), "title": v.get("title"),

@@ -41,6 +41,7 @@ class Store:
               completed_at REAL, message TEXT NOT NULL DEFAULT '', lease_until REAL);
             CREATE TABLE IF NOT EXISTS submissions (visitor TEXT NOT NULL, at REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS item_state (video_id TEXT PRIMARY KEY, state TEXT NOT NULL, at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS suggested_history (video_id TEXT PRIMARY KEY, at REAL NOT NULL);
             ''')
     def connect(self):
         db=sqlite3.connect(self.path, timeout=30); db.row_factory=sqlite3.Row
@@ -84,6 +85,18 @@ class Store:
     def item_states(self):
         with self.connect() as db:
             return {row['video_id']:row['state'] for row in db.execute('SELECT video_id,state FROM item_state')}
+    def suggested_history(self):
+        # Every video ever put in Suggestions. Durable in the store so the no-repeat
+        # history survives restarts/redeploys (build/ is git-ignored and starts empty).
+        with self.connect() as db:
+            return {row['video_id'] for row in db.execute('SELECT video_id FROM suggested_history')}
+    def add_suggested(self, video_ids):
+        # Add-only: never forgets a past suggestion, never errors on a repeat.
+        now=time.time()
+        with self.connect() as db:
+            db.executemany('INSERT OR IGNORE INTO suggested_history(video_id,at) VALUES(?,?)',
+                           [(v,now) for v in video_ids if v])
+        return self.suggested_history()
     def seed_used(self, video_ids):
         for video_id in video_ids:
             with self.connect() as db:

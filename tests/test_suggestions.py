@@ -124,6 +124,89 @@ def test_picks_from_response_prefers_the_structured_tool_call():
     assert S._picks_from_response(resp) == [{"video_id": "x", "reason": "r"}]
 
 
+def each_own_adv(videos):
+    return {"schema_version": 2,
+            "advertisers": [{"advertiser": {"name": f"Adv{i}"}, "videos": [v]}
+                            for i, v in enumerate(videos)]}
+
+
+# ---------- always return 10: relax ladder (never English) ----------
+
+def test_eligible_pool_does_not_relax_when_base_already_has_ten():
+    fresh = [vid(i, age_days=30, product=f"P{i}", advertiser_name=f"Adv{i}") for i in range(12)]
+    pool, step = S.eligible_pool(fresh, set(), target=10)
+    assert step == 0 and len(pool) >= 10          # nothing relaxed
+
+
+def test_eligible_pool_relaxes_age_12_to_24_months_to_reach_ten():
+    # 10 distinct videos, each 500 days old (>12mo, <=24mo), 1M+ views: none pass at
+    # the 12-month base, all pass once age relaxes to 24 months (step 1).
+    old = [vid(i, age_days=500, product=f"P{i}", advertiser_name=f"Adv{i}") for i in range(10)]
+    pool, step = S.eligible_pool(old, set(), target=10)
+    assert step == 1 and len(pool) == 10
+
+
+def test_eligible_pool_relaxes_to_three_per_advertiser_before_views():
+    # 4 advertisers x 3 fresh 1M+ videos. Base cap (2/adv) yields 8; only raising the
+    # per-advertiser cap to 3 (step 2) reaches 10 -- views never had to drop.
+    vids = [vid(a * 10 + p, age_days=30, product=f"P{a}-{p}", advertiser_name=f"Adv{a}")
+            for a in range(4) for p in range(3)]
+    pool, step = S.eligible_pool(vids, set(), target=10)
+    assert step == 2 and len(pool) >= 10
+
+
+def test_generate_never_relaxes_english_to_backfill():
+    # 4 English + 20 non-English, all otherwise eligible, each its own advertiser.
+    # The pool must stay English-only -- non-English is never used to reach 10.
+    eng = [vid(i, english=True) for i in range(4)]
+    non = [vid(100 + i, english=False) for i in range(20)]
+    picker = lambda cands: [{"video_id": c["video_id"], "reason": "r"} for c in cands]
+    rows = S.generate(each_own_adv(eng + non), {}, set(), picker=picker)
+    assert len(rows) == 4
+    assert {r["video_id"] for r in rows} == {v["video_id"] for v in eng}
+
+
+# ---------- de-dupe picks (the 8vHa5bvRoUA duplicate) ----------
+
+def test_generate_dedupes_a_repeated_pick():
+    picker = lambda cands: [
+        {"video_id": "vid000001ab", "reason": "a"},
+        {"video_id": "vid000001ab", "reason": "dup"},   # same video again (what Haiku did)
+        {"video_id": "vid000002ab", "reason": "b"},
+    ]
+    rows = S.generate(ds([vid(1), vid(2)]), {}, set(), picker=picker)
+    assert [r["video_id"] for r in rows] == ["vid000001ab", "vid000002ab"]  # no duplicate
+    assert [r["rank"] for r in rows] == [1, 2]                              # ranks stay contiguous
+
+
+# ---------- durable store-backed history ----------
+
+def test_run_refresh_excludes_store_history_and_records_new_picks(tmp_path):
+    from add_brand import Store
+    store = Store(tmp_path / "q.sqlite")
+    store.add_suggested(["vid000001ab"])            # already suggested before
+    lib = tmp_path / "library.json"
+    lib.write_text(json.dumps(ds([vid(1), vid(2), vid(3)])), encoding="utf-8")
+    out = tmp_path / "suggestions.json"
+    picker = lambda cands: [{"video_id": c["video_id"], "reason": "r"} for c in cands]
+    S.run_refresh(lib, {}, out, when=datetime(2026, 11, 9), picker=picker,
+                  history_get=store.suggested_history, history_add=store.add_suggested)
+    ids = [r["video_id"] for r in json.loads(out.read_text(encoding="utf-8"))["suggestions"]]
+    assert "vid000001ab" not in ids                 # excluded by durable history
+    assert set(ids) == {"vid000002ab", "vid000003ab"}
+    # the new picks are recorded, so the next refresh won't repeat them
+    assert store.suggested_history() == {"vid000001ab", "vid000002ab", "vid000003ab"}
+
+
+def test_seed_store_history_from_suggestions_json(tmp_path):
+    from add_brand import Store
+    store = Store(tmp_path / "q.sqlite")
+    sj = tmp_path / "suggestions.json"
+    sj.write_text(json.dumps({"suggestions": [{"video_id": "old1"}, {"video_id": "old2"}]}), encoding="utf-8")
+    assert S.seed_store_history(store, sj) == {"old1", "old2"}
+    assert store.suggested_history() == {"old1", "old2"}
+
+
 def test_run_refresh_keeps_previous_file_when_parsing_fails(tmp_path):
     # Simulate an unparseable reply: the picker raises the parse error that the live
     # path raises. The night must NOT crash and must keep the previous suggestions.json.

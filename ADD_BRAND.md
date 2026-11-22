@@ -20,6 +20,8 @@ Add only these exact site proxy routes in `public/.herenow/proxy.json` once the 
 
 - `/api/add-brand`: upstream exact `/brands` route, `method: POST`, `rateLimit: 5/hour/ip`.
 - `/api/brands`: same upstream, `method: GET`, `rateLimit: 600/hour/ip`.
+- `/api/item-state`: upstream exact `/item-state` route, `method: POST`, `rateLimit: 600/hour/ip`. (Used / Not relevant buttons; without this route they only persist in the viewer's browser, never in the store.)
+- `/api/item-states`: same upstream `/item-states`, `method: GET`, `rateLimit: 600/hour/ip`. (Loads the owner's saved Used / Not relevant state on every visit.)
 - Inject `Authorization: Bearer ${YOUTUBE_BRAND_SERVICE_TOKEN}` from a here.now Coolina workspace variable pinned to the upstream hostname. Never ship the actual token.
 
 No wildcard proxy, arbitrary upstream URL, admin/scheduler endpoint, edit/delete handler, or request-controlled command. Both routes require the service token upstream. Backend rejects PATCH/PUT/DELETE, invalid URLs/names/extra fields and bodies over4096 bytes. Google query parameters are discarded and reconstructed as US/video/YouTube without date restrictions.

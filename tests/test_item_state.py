@@ -33,3 +33,14 @@ def test_seed_used_is_idempotent_and_non_destructive(tmp_path):
     store.set_item_state(VID, "not_relevant")
     store.seed_used([VID])
     assert store.item_states() == {VID: "not_relevant"}
+
+
+def test_suggested_history_is_durable_and_add_only(tmp_path):
+    db = tmp_path / "q.sqlite"
+    store = Store(db)
+    assert store.suggested_history() == set()
+    store.add_suggested(["aaa", "bbb"])
+    store.add_suggested(["bbb", "ccc"])          # repeat 'bbb' is ignored, not an error
+    assert store.suggested_history() == {"aaa", "bbb", "ccc"}
+    # survives a restart (same sqlite file) -> history is not lost on redeploy
+    assert Store(db).suggested_history() == {"aaa", "bbb", "ccc"}

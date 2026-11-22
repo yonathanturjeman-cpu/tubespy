@@ -69,7 +69,10 @@ def main():
     args = parser.parse_args()
     store = Store(args.db)
     import mini_config
+    import suggestions
     store.seed_used(mini_config.USED_SEED_VIDEO_IDS)  # seed the Used tab (from config)
+    # durable no-repeat Suggestions history, seeded from every video ever suggested
+    suggestions.seed_store_history(store, ROOT / "public/data/suggestions.json", suggestions.HISTORY_PATH)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
     print(f"Dev library running at http://127.0.0.1:{args.port}/", flush=True)
     server.serve_forever()

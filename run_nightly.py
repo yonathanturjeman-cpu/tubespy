@@ -160,7 +160,13 @@ async def _run_async(now_local: datetime, deadline: float, dry_run: bool) -> dic
     import suggestions
     sugg_path = mini_config.OUR_ROOT / "public" / "data" / "suggestions.json"
     if lib_path.exists():
-        report["suggestions"] = suggestions.run_refresh(lib_path, store.item_states(), sugg_path, when=now_local)
+        # Seed the durable no-repeat history once from every video ever suggested
+        # (idempotent/add-only), then refresh against the store-backed history so a
+        # fresh mini never re-offers old picks and each refresh is 10 NEW ones.
+        suggestions.seed_store_history(store, sugg_path, suggestions.HISTORY_PATH)
+        report["suggestions"] = suggestions.run_refresh(
+            lib_path, store.item_states(), sugg_path, when=now_local,
+            history_get=store.suggested_history, history_add=store.add_suggested)
         log.info("suggestions: %s", report["suggestions"])
 
     # 5) PUBLISH (full site to OUR preview; never Liel's live page)
