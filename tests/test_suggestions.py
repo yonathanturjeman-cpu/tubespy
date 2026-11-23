@@ -179,6 +179,29 @@ def test_generate_dedupes_a_repeated_pick():
     assert [r["rank"] for r in rows] == [1, 2]                              # ranks stay contiguous
 
 
+def test_generate_tops_up_to_ten_when_ai_returns_fewer():
+    # 14 eligible videos (each its own advertiser/product); the AI picker returns only
+    # 3. generate must top up to 10 from the remaining ranked candidates -- no repeats,
+    # contiguous ranks -- so the user always gets 10 when the data allows.
+    vids = [vid(i) for i in range(14)]
+    picker = lambda cands: [{"video_id": c["video_id"], "reason": "ai"} for c in cands[:3]]
+    rows = S.generate(each_own_adv(vids), {}, set(), picker=picker)
+    ids = [r["video_id"] for r in rows]
+    assert len(rows) == 10 and len(set(ids)) == 10                 # 10 distinct, topped up
+    assert [r["rank"] for r in rows] == list(range(1, 11))         # contiguous ranks
+    assert [r["reason"] for r in rows[:3]] == ["ai", "ai", "ai"]   # AI picks keep their reason
+    assert all("reach 10" in r["reason"] for r in rows[3:])        # fillers carry the top-up reason
+
+
+def test_generate_does_not_invent_picks_when_pool_is_small():
+    # Only 4 eligible videos and the AI returned 2: top-up can only reach what the pool
+    # has (4), never fabricates beyond the eligible candidates.
+    vids = [vid(i) for i in range(4)]
+    picker = lambda cands: [{"video_id": c["video_id"], "reason": "ai"} for c in cands[:2]]
+    rows = S.generate(each_own_adv(vids), {}, set(), picker=picker)
+    assert len(rows) == 4 and len({r["video_id"] for r in rows}) == 4
+
+
 # ---------- durable store-backed history ----------
 
 def test_run_refresh_excludes_store_history_and_records_new_picks(tmp_path):

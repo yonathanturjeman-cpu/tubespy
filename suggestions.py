@@ -355,14 +355,29 @@ def generate(dataset: dict, item_states: dict, history: set[str], picker=None) -
         if not v or vid in seen:   # drop unknowns and de-dupe (never show a video twice)
             continue
         seen.add(vid)
-        rank = len(rows) + 1
-        rows.append({
-            "rank": rank, "reason": pick["reason"], "video_id": v["video_id"],
-            "product": v.get("product"), "title": v.get("title"),
-            "channel": v.get("advertiser_name") or v.get("author"),
-            "views": v.get("views"), "views_per_day": round(v.get("lifetime_views_per_day") or 0),
-            "length_seconds": v.get("length_seconds"), "upload_date": v.get("upload_date"),
-            "embed_url": v.get("embed_url"), "thumbnail_url": v.get("thumbnail_url"),
-            "youtube_url": v.get("youtube_url"), "transparency_url": v.get("transparency_url"),
-        })
+        rows.append(_suggestion_row(len(rows) + 1, pick["reason"], v))
+    # The AI sometimes returns fewer than PICK (it dropped bad fits). Top up from the
+    # remaining ranked candidates until we have 10 -- the pool is signal-ranked and
+    # already English-only, within the per-advertiser/product caps, and history-
+    # excluded, so the top-ups obey every rule the picks did.
+    if len(rows) < PICK:
+        for v in pool:
+            if len(rows) >= PICK:
+                break
+            if v["video_id"] in seen:
+                continue
+            seen.add(v["video_id"])
+            rows.append(_suggestion_row(len(rows) + 1, "Top signal score (added to reach 10).", v))
     return rows
+
+
+def _suggestion_row(rank: int, reason: str, v: dict) -> dict:
+    return {
+        "rank": rank, "reason": reason, "video_id": v["video_id"],
+        "product": v.get("product"), "title": v.get("title"),
+        "channel": v.get("advertiser_name") or v.get("author"),
+        "views": v.get("views"), "views_per_day": round(v.get("lifetime_views_per_day") or 0),
+        "length_seconds": v.get("length_seconds"), "upload_date": v.get("upload_date"),
+        "embed_url": v.get("embed_url"), "thumbnail_url": v.get("thumbnail_url"),
+        "youtube_url": v.get("youtube_url"), "transparency_url": v.get("transparency_url"),
+    }
